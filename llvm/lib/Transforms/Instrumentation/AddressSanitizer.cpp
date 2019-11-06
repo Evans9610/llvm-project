@@ -24,6 +24,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -85,6 +86,9 @@
 #include <string>
 #include <tuple>
 
+#include <iostream>
+
+
 using namespace llvm;
 
 #define DEBUG_TYPE "asan"
@@ -143,6 +147,10 @@ static const char *const kAsanRegisterElfGlobalsName =
   "__asan_register_elf_globals";
 static const char *const kAsanUnregisterElfGlobalsName =
   "__asan_unregister_elf_globals";
+static const char *const kAsanPoisonMemoryRegion =
+  "__asan_poison_memory_region";
+static const char *const kAsanUnPoisonMemoryRegion =
+  "__asan_unpoison_memory_region";
 static const char *const kAsanPoisonGlobalsName = "__asan_before_dynamic_init";
 static const char *const kAsanUnpoisonGlobalsName = "__asan_after_dynamic_init";
 static const char *const kAsanInitName = "__asan_init";
@@ -628,6 +636,7 @@ struct AddressSanitizer : public FunctionPass {
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
+    AU.addRequired<ScalarEvolutionWrapperPass>();
   }
 
   uint64_t getAllocaSizeInBytes(const AllocaInst &AI) const {
@@ -681,6 +690,15 @@ struct AddressSanitizer : public FunctionPass {
 
   DominatorTree &getDominatorTree() const { return *DT; }
 
+  /* customized structure poison */
+  bool retrieveGEPwithStructure(Function &F,
+                                SmallVector<Instruction *, 32> *GEPs,
+                                TargetLibraryInfo *TLI, ScalarEvolution *SE);
+  bool visitGEP(ArrayRef<Instruction *> GEPs,
+      SmallVector<std::pair<Instruction *, Instruction *>, 32> *targetInst);
+  Instruction *dfsDataFlow(Instruction *inst);
+  bool insertPoison(SmallVector<std::pair<Instruction *, Instruction *>, 32> &targetInst);
+
 private:
   friend struct FunctionStackPoisoner;
 
@@ -733,6 +751,9 @@ private:
   Value *LocalDynamicShadow = nullptr;
   GlobalsMetadata GlobalsMD;
   DenseMap<const AllocaInst *, bool> ProcessedAllocas;
+
+  // Manually poison
+  Function *AsanPoison, *AsanUnPoison;
 };
 
 class AddressSanitizerModule : public ModulePass {
@@ -2377,12 +2398,20 @@ void AddressSanitizer::initializeCallbacks(Module &M) {
   AsanMemmove = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
       MemIntrinCallbackPrefix + "memmove", IRB.getInt8PtrTy(),
       IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), IntptrTy));
+  /* void *memcpy(void *dest, const void *src, size_t n); */
   AsanMemcpy = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
       MemIntrinCallbackPrefix + "memcpy", IRB.getInt8PtrTy(),
       IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), IntptrTy));
+  /* void *memset(void *s, int c, size_t n); */
   AsanMemset = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
       MemIntrinCallbackPrefix + "memset", IRB.getInt8PtrTy(),
       IRB.getInt8PtrTy(), IRB.getInt32Ty(), IntptrTy));
+  AsanPoison = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+      kAsanPoisonMemoryRegion, IRB.getVoidTy(), IRB.getInt8PtrTy(), IntptrTy));
+  AsanUnPoison = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+      kAsanUnPoisonMemoryRegion, IRB.getVoidTy(), IRB.getInt8PtrTy(), IntptrTy));
+  /* AsanPoison = M.getFunction(kAsanPoisonMemoryRegion); */
+  /* AsanUnPoison = M.getFunction(kAsanUnPoisonMemoryRegion); */
 
   AsanHandleNoReturnFunc = checkSanitizerInterfaceFunction(
       M.getOrInsertFunction(kAsanHandleNoReturnName, IRB.getVoidTy()));
@@ -2532,8 +2561,10 @@ bool AddressSanitizer::runOnFunction(Function &F) {
   bool IsWrite;
   unsigned Alignment;
   uint64_t TypeSize;
-  const TargetLibraryInfo *TLI =
+  TargetLibraryInfo *TLI =
       &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+  ScalarEvolution *SE =
+      &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
 
   // Fill the set of memory operations to instrument.
   for (auto &BB : F) {
@@ -2624,7 +2655,150 @@ bool AddressSanitizer::runOnFunction(Function &F) {
   LLVM_DEBUG(dbgs() << "ASAN done instrumenting: " << FunctionModified << " "
                     << F << "\n");
 
+  // collect GEPinst with structure access
+  SmallVector<Instruction *, 32> GEPs;
+  if (!retrieveGEPwithStructure(F, &GEPs, TLI, SE)) return FunctionModified;
+
+  // determine which GEP is concerned and collect its instruction
+  // std::pair(GEP, concerned instruction)
+  SmallVector<std::pair<Instruction *, Instruction *>, 32> targetInst;
+  if (!visitGEP(GEPs, &targetInst)) return FunctionModified;
+
+  /* for (size_t i = 0; i < targetInst.size(); i++) { */
+  /*   std::cerr << "first: "; */
+  /*   targetInst[i].first->dump(); */
+  /*   std::cerr << "second: "; */
+  /*   targetInst[i].second->dump(); */
+  /* } */
+
+  // Doing insert poison
+  insertPoison(targetInst);
+
   return FunctionModified;
+}
+
+bool AddressSanitizer::insertPoison(SmallVector<std::pair<Instruction *, Instruction *>, 32> &targetInst) {
+  // retrieve index of structure
+  for (size_t i = 0; i < targetInst.size(); i++) {
+    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(targetInst[i].first)) {
+      auto Zero = ConstantInt::get(IntptrTy, 0);    // constant 0
+      // structure fields index
+      unsigned fieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+      fieldIndex += 1;
+      Instruction *target = targetInst[i].second;   // memcpy
+      Value *instrumentAddr = nullptr;              // GEP result
+      IRBuilder<> IRB(target);                      // poison before memcpy
+
+      // struct type
+      /* GEP->getSourceElementType()->dump(); */
+      // load inst
+      /* GEP->getPointerOperand()->dump(); */
+
+      // TODO: create LoadInst
+      // source loadInst
+      LoadInst *test = dyn_cast<LoadInst>(GEP->getPointerOperand());
+      // %dsi.addr = alloca %struct.DSI*, align 8
+      /* test->getOperand(0)->dump(); */
+      // %struct.DSI**
+      /* test->getPointerOperandType()->dump(); */
+      // %struct.DSI*
+      /* test->getType()->dump(); */
+
+      /* poison */
+      Value *structAddr = IRB.CreateLoad(test->getType(), test->getOperand(0));
+      instrumentAddr = IRB.CreateInBoundsGEP(GEP->getSourceElementType(),
+          structAddr, {IRB.getInt32(0), IRB.getInt32(fieldIndex)});
+      Value *castedAddr = IRB.CreatePointerCast(instrumentAddr, IRB.getInt8PtrTy());
+      IRB.CreateCall(AsanPoison, {castedAddr, IRB.getInt32(8)});
+
+      /* unpoison */
+      IRBuilder<> IRB2(target->getNextNonDebugInstruction());
+      IRB2.CreateCall(AsanUnPoison, {castedAddr, IRB.getInt32(8)});
+    }
+  }
+  return true;
+}
+
+// DFS to traverse dependence graph to find out target function
+Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
+  // callInst
+  if (CallInst *inst = dyn_cast<CallInst>(GEPinst)) {
+    if (Function *calledFunction = dyn_cast<Function>(inst->getCalledFunction())) {
+      if (calledFunction->getName().endswith("memcpy")) {
+        return cast<Instruction>(inst);
+      }
+    }
+  }
+
+  // without use
+  if (GEPinst->use_empty()) {
+    return NULL;
+  }
+
+  SmallVector<User *, 32> list;
+  list.append(GEPinst->user_begin(), GEPinst->user_end());
+  while (!list.empty()) {
+    return dfsDataFlow(cast<Instruction>(list.pop_back_val()));
+  }
+  return NULL;
+}
+
+bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
+      SmallVector<std::pair<Instruction *, Instruction *>, 32> *targetInst) {
+
+  // TODO: perform search for every GEPInst to find out users
+  for (Instruction *GEP : GEPs) {
+    for (User *U : GEP->users()) {
+      // target found
+      if (Instruction *inst = dyn_cast<Instruction>(dfsDataFlow(cast<Instruction>(U)))) {
+        if (inst == NULL) return false;
+        targetInst->push_back(std::make_pair(GEP, inst));
+      }
+    }
+  }
+  return true;;
+}
+
+/* retrieve all the instruction in function */
+bool AddressSanitizer::retrieveGEPwithStructure(Function &F,
+                    SmallVector<Instruction *, 32> *GEPs,
+                    TargetLibraryInfo *TLI, ScalarEvolution *SE) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  ObjectSizeOffsetEvaluator ObjSizeEval(DL, TLI, F.getContext(),
+                                           /*RoundToAlign=*/true);
+
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+        // only consider about GEP with structure
+        if (!GEP->getSourceElementType()->isStructTy()) continue;
+
+        // only consider about non-literal structures and must have name
+        StructType *srcTy = cast<StructType>(GEP->getSourceElementType());
+        if (srcTy->isLiteral()) continue;
+        if (!srcTy->hasName()) continue;
+
+        // only consider about the struct has multiple members
+        unsigned srcSize = srcTy->getNumElements();
+        if (!(srcSize > 1)) continue;
+
+        // only consider about the GEP with fixed two indices
+        if (!GEP->hasAllConstantIndices()) continue;
+        if (GEP->getNumIndices() != 2) continue;
+
+        // don't consider about last field
+        ConstantInt *fieldIndex = cast<ConstantInt>(GEP->getOperand(2));
+        if (fieldIndex->getZExtValue() > srcSize - 2) continue;
+
+        /* std::cerr << "New GEP: \t"; */
+        /* GEP->dump(); */
+        /* std::cerr << "Number of fields: " << srcSize << " \tCurrent field idx: "; */
+        /* std::cerr << fieldIndex->getZExtValue() << std::endl; */
+        GEPs->push_back(&I);
+      }
+    }
+  }
+  return !GEPs->empty();
 }
 
 // Workaround for bug 11395: we don't want to instrument stack in functions

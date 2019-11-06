@@ -11,7 +11,7 @@ debug: llvm-debug
 
 llvm-config: ${BUILD_DIR}
 	(cd ${BUILD_DIR} && \
-		CC=clang CXX=clang++ cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt" -G "Unix Makefiles" \
+		CC=clang CXX=clang++ cmake -DLLVM_ENABLE_DUMP=ON -DLLVM_ENABLE_DOXYGEN=On -DLLVM_ENABLE_PROJECTS="clang;compiler-rt" -G "Unix Makefiles" \
 		-DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_BUILD_TYPE=Release ${LLVM_DIR})
 
 llvm-debug: ${BUILD_DIR}
