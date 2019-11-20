@@ -87,6 +87,8 @@
 #include <tuple>
 
 #include <iostream>
+#include <map>
+#include "llvm/Analysis/DependenceAnalysis.h"
 
 
 using namespace llvm;
@@ -191,6 +193,10 @@ static const size_t kNumberOfAccessSizes = 5;
 static const unsigned kAllocaRzSize = 32;
 
 // Command-line flags.
+//
+static cl::opt<bool> ClDisableStructurePoison(
+    "asan-nopoison", cl::desc("Disable intra-object-overflow instrumentation"),
+    cl::Hidden, cl::init(false));
 
 static cl::opt<bool> ClEnableKasan(
     "asan-kernel", cl::desc("Enable KernelAddressSanitizer instrumentation"),
@@ -695,9 +701,9 @@ struct AddressSanitizer : public FunctionPass {
                                 SmallVector<Instruction *, 32> *GEPs,
                                 TargetLibraryInfo *TLI, ScalarEvolution *SE);
   bool visitGEP(ArrayRef<Instruction *> GEPs,
-      SmallVector<std::pair<Instruction *, Instruction *>, 32> *targetInst);
+      std::map<Instruction *, Instruction *> &targetInst);
   Instruction *dfsDataFlow(Instruction *inst);
-  bool insertPoison(SmallVector<std::pair<Instruction *, Instruction *>, 32> &targetInst);
+  bool insertPoison(std::map<Instruction *, Instruction *> &targetInst);
 
 private:
   friend struct FunctionStackPoisoner;
@@ -754,6 +760,7 @@ private:
 
   // Manually poison
   Function *AsanPoison, *AsanUnPoison;
+  Function *currentFunction;
 };
 
 class AddressSanitizerModule : public ModulePass {
@@ -2654,66 +2661,107 @@ bool AddressSanitizer::runOnFunction(Function &F) {
 
   LLVM_DEBUG(dbgs() << "ASAN done instrumenting: " << FunctionModified << " "
                     << F << "\n");
+  if (F.hasName()) {
+    std::cerr << "runOnFunction: " << F.getName().str() << std::endl;
+  }
 
-  // collect GEPinst with structure access
+  /* collect GEPinst with structure access */
   SmallVector<Instruction *, 32> GEPs;
+  /* TODO[High]: retrieveGEP from callInst */
+  /* TODO[High]: accumulate index of structure. SEE: dsi_opensess.c:63 */
   if (!retrieveGEPwithStructure(F, &GEPs, TLI, SE)) return FunctionModified;
 
-  // determine which GEP is concerned and collect its instruction
-  // std::pair(GEP, concerned instruction)
-  SmallVector<std::pair<Instruction *, Instruction *>, 32> targetInst;
-  if (!visitGEP(GEPs, &targetInst)) return FunctionModified;
+  std::map<Instruction *, Instruction *> targetInst;
+  if (!visitGEP(GEPs, targetInst)) return FunctionModified;
+  if (targetInst.empty()) return FunctionModified;    // nothing to do
+  this->currentFunction = &F;
 
-  /* for (size_t i = 0; i < targetInst.size(); i++) { */
-  /*   std::cerr << "first: "; */
-  /*   targetInst[i].first->dump(); */
-  /*   std::cerr << "second: "; */
-  /*   targetInst[i].second->dump(); */
+  /* TODO[Low]: Instrument across function call */
+  /* For example, we pass a pointer which points to a field of a structure into */
+  /* a function which accesss by pointer, if we didn't trace the passing then */
+  /* we are unable to insert poison in the function */
+  /* std::map<Instruction *, Instruction *>::iterator iter; */
+  /* for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) { */
+  /*   iter->first->dump(); */
+  /*   iter->second->dump(); */
   /* } */
 
-  // Doing insert poison
+  if (ClDisableStructurePoison) return FunctionModified;
   insertPoison(targetInst);
-
   return FunctionModified;
 }
 
-bool AddressSanitizer::insertPoison(SmallVector<std::pair<Instruction *, Instruction *>, 32> &targetInst) {
-  // retrieve index of structure
-  for (size_t i = 0; i < targetInst.size(); i++) {
-    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(targetInst[i].first)) {
-      auto Zero = ConstantInt::get(IntptrTy, 0);    // constant 0
-      // structure fields index
+bool AddressSanitizer::insertPoison(std::map<Instruction *, Instruction *> &targetInst) {
+  if (this->currentFunction->hasName()) {
+    std::cerr << "Insert Poison On Function: ";
+    std::cerr << this->currentFunction->getName().str() << std::endl;
+    std::cerr << "TargetInst pair: " << std::endl;
+  }
+  std::map<Instruction *, Instruction *>::iterator iter;
+  for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
+    DILocation *GEPLoc = iter->first->getDebugLoc().get();
+    DILocation *funcLoc = iter->second->getDebugLoc().get();
+    iter->first->dump();
+    std::cerr << "at line: " << GEPLoc->getLine() << " \n";
+    iter->second->dump();
+    std::cerr << "at line: " << funcLoc->getLine() << " \n";
+  }
+
+  for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
+    if (iter->first == nullptr) continue;
+    if (iter->second == nullptr) continue;
+    /* TODO[Low]: not only poison memcpy CallInst */
+    if (!isa<GetElementPtrInst>(iter->first)) continue;
+    if (!isa<Instruction>(iter->second)) continue;
+    GetElementPtrInst *GEP = cast<GetElementPtrInst>(iter->first);
+    Instruction *target = iter->second;
+
+    if (!isa<LoadInst>(GEP->getPointerOperand())) continue;
+    LoadInst *loadStructAddr = dyn_cast<LoadInst>(GEP->getPointerOperand());
+    Value *operand = loadStructAddr->getOperand(0);
+    if (operand == nullptr) continue;
+
+    /* starting instrument between target Instruction */
+    IRBuilder<> IRB(target);          // instrument between target instruction
+    /* TODO[Low]: nested structure poison instrument */
+    if (isa<GetElementPtrInst>(operand)) {
+      GetElementPtrInst *nestedStructGEP = dyn_cast<GetElementPtrInst>(operand);
+      LoadInst *nestedStructLoadInst = dyn_cast<LoadInst>(nestedStructGEP->getPointerOperand());
+      GEP->dump();
+      loadStructAddr->dump();
+      nestedStructGEP->dump();
+      nestedStructLoadInst->dump();
+      nestedStructLoadInst->getOperand(0)->dump();
+      /* Value *nestedOperand = nestedStructLoadInst->getOperand(0); */
+      /* Instruction *cloneLoadNestedStructInst = loadNestedStructInst->clone(); */
+      /* cloneLoadNestedStructInst->insertBefore(target); */
+      /* Value *resultOfNestedStructGEP = IRB.CreateInBoundsGEP(nestedGEP->getSourceElementType(), */
+      /*     cloneLoadNestedStructInst, {IRB.getInt32(0), IRB.getInt32(1)}); */
+      /* Value *nestedStructAddr = IRB.CreateLoad(loadNestedStructInst->getType(), */
+      /*                                          loadNestedStructInst->getOperand(0)); */
+      /* Instruction *cloneNestedGEP = nestedGEP->clone(); */
+      /* cloneNestedGEP->insertBefore(target); */
+      /* Instruction *cloneLoadStructInst = loadStructAddr->clone(); */
+      /* cloneLoadStructInst->insertBefore(target); */
+    } else if (isa<AllocaInst>(operand)) {
+      Value *structAddr = IRB.CreateLoad(loadStructAddr->getType(),
+                                         loadStructAddr->getOperand(0));
+      /* create GEP to caculate the address of the target field */
       unsigned fieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
-      fieldIndex += 1;
-      Instruction *target = targetInst[i].second;   // memcpy
-      Value *instrumentAddr = nullptr;              // GEP result
-      IRBuilder<> IRB(target);                      // poison before memcpy
-
-      // struct type
-      /* GEP->getSourceElementType()->dump(); */
-      // load inst
-      /* GEP->getPointerOperand()->dump(); */
-
-      // TODO: create LoadInst
-      // source loadInst
-      LoadInst *test = dyn_cast<LoadInst>(GEP->getPointerOperand());
-      // %dsi.addr = alloca %struct.DSI*, align 8
-      /* test->getOperand(0)->dump(); */
-      // %struct.DSI**
-      /* test->getPointerOperandType()->dump(); */
-      // %struct.DSI*
-      /* test->getType()->dump(); */
-
-      /* poison */
-      Value *structAddr = IRB.CreateLoad(test->getType(), test->getOperand(0));
-      instrumentAddr = IRB.CreateInBoundsGEP(GEP->getSourceElementType(),
-          structAddr, {IRB.getInt32(0), IRB.getInt32(fieldIndex)});
-      Value *castedAddr = IRB.CreatePointerCast(instrumentAddr, IRB.getInt8PtrTy());
-      IRB.CreateCall(AsanPoison, {castedAddr, IRB.getInt32(8)});
-
-      /* unpoison */
-      IRBuilder<> IRB2(target->getNextNonDebugInstruction());
-      IRB2.CreateCall(AsanUnPoison, {castedAddr, IRB.getInt32(8)});
+      fieldIndex += 1;                  // poison the next field of access
+      Value *resultOfGEP = nullptr;     // store the result of GEPinst
+      resultOfGEP = IRB.CreateInBoundsGEP(GEP->getSourceElementType(),
+                                    structAddr,
+                                    {IRB.getInt32(0), IRB.getInt32(fieldIndex)});
+      /* cast pointer type */
+      Value *castAddrInst = IRB.CreatePointerCast(resultOfGEP, IRB.getInt8PtrTy());
+      /* poison 8 bytes */
+      CallInst *poisonCall = IRB.CreateCall(AsanPoison,
+                                           {castAddrInst, IRB.getInt64(8)});
+      /* unpoison after target function */
+      CallInst *unPoisonCall = IRB.CreateCall(AsanUnPoison,
+                                           {castAddrInst, IRB.getInt64(8)});
+      unPoisonCall->moveAfter(target);
     }
   }
   return true;
@@ -2721,39 +2769,97 @@ bool AddressSanitizer::insertPoison(SmallVector<std::pair<Instruction *, Instruc
 
 // DFS to traverse dependence graph to find out target function
 Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
-  // callInst
-  if (CallInst *inst = dyn_cast<CallInst>(GEPinst)) {
-    if (Function *calledFunction = dyn_cast<Function>(inst->getCalledFunction())) {
-      if (calledFunction->getName().endswith("memcpy")) {
-        return cast<Instruction>(inst);
-      }
-    }
-  }
-
   // without use
   if (GEPinst->use_empty()) {
-    return NULL;
+    return nullptr;
   }
-
   SmallVector<User *, 32> list;
   list.append(GEPinst->user_begin(), GEPinst->user_end());
   while (!list.empty()) {
-    return dfsDataFlow(cast<Instruction>(list.pop_back_val()));
+    User *U = list.pop_back_val();
+    if (CallInst *inst = dyn_cast<CallInst>(U)) {
+      Function *calledFunction = inst->getCalledFunction();
+      if (calledFunction != nullptr) {
+        // only consider about memcpy
+        if (calledFunction->getName().endswith("memcpy")) {
+          // do not consider about the third argument of memcpy function
+          Value *firstArg = inst->getArgOperand(0);
+          Value *secondArg = inst->getArgOperand(1);
+          Value *thirdArg = inst->getArgOperand(2);
+          // skip the third argument
+          if (GEPinst == dyn_cast<Instruction>(thirdArg)) continue;
+          // the first argument is GEP from structure
+          /* if (GetElementPtrInst *isGEP = dyn_cast<GetElementPtrInst>(firstArg)) { */
+          /* } */
+          /* if (GetElementPtrInst *isGEP = dyn_cast<GetElementPtrInst>(secondArg)) { */
+          /* } */
+          return cast<Instruction>(inst);
+        }
+      }
+    }
+    return dfsDataFlow(cast<Instruction>(U));
   }
-  return NULL;
+  return nullptr;
 }
 
 bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
-      SmallVector<std::pair<Instruction *, Instruction *>, 32> *targetInst) {
+      std::map<Instruction *, Instruction *> &targetInst) {
+  ArrayRef<Instruction *>::iterator iter;
+  for (iter = GEPs.begin(); iter != GEPs.end(); ++iter) {
+    for (User *U : (*iter)->users()) {
+      if (!isa<Instruction>(U)) continue;
+      Instruction *intoDFS = cast<Instruction>(U);
+      if (intoDFS == nullptr) continue;
+      Instruction *result = dfsDataFlow(intoDFS);
+      if (result == nullptr || !isa<Instruction>(result)) continue;
 
-  // TODO: perform search for every GEPInst to find out users
-  for (Instruction *GEP : GEPs) {
-    for (User *U : GEP->users()) {
-      // target found
-      if (Instruction *inst = dyn_cast<Instruction>(dfsDataFlow(cast<Instruction>(U)))) {
-        if (inst == NULL) return false;
-        targetInst->push_back(std::make_pair(GEP, inst));
+      /* targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result)); */
+      if (targetInst.empty()) {
+        targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+        continue;
       }
+      bool insert = true;
+      GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(*iter);
+      CallInst *call = dyn_cast<CallInst>(result);
+      unsigned field = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+      /* searching for duplicate */
+      std::map<Instruction *, Instruction *>::iterator targetIter;
+      for (targetIter = targetInst.begin(); targetIter != targetInst.end(); ++targetIter) {
+        GetElementPtrInst *findGEP = dyn_cast<GetElementPtrInst>(targetIter->first);
+        CallInst *findCall = dyn_cast<CallInst>(targetIter->second);
+        unsigned findField = cast<ConstantInt>(findGEP->getOperand(2))->getZExtValue();
+        if (GEP->getSourceElementType() != findGEP->getSourceElementType())
+          continue;
+        if (call != findCall) continue;
+        /* only compare field index with same structure and same function call */
+        /* new one index smaller than old one */
+        if (field < findField) {
+          if (findField - field == 1) {
+            /* sequential field */
+            insert = false;
+          } else {
+            /* replace old one with new one */
+            targetInst.erase(targetIter);
+            targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+            insert = false;
+          }
+        } else if(field > findField) {
+          /* new one index larger than old one */
+          if (field - findField == 1) {
+            /* replace old one with new one */
+            targetInst.erase(targetIter);
+            targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+            insert = false;
+          } else {
+            /* ignore new one */
+            insert = false;
+          }
+        }
+      }
+      if (insert) {
+        targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+      }
+      /* end of User loop */
     }
   }
   return true;;
@@ -2789,12 +2895,12 @@ bool AddressSanitizer::retrieveGEPwithStructure(Function &F,
         // don't consider about last field
         ConstantInt *fieldIndex = cast<ConstantInt>(GEP->getOperand(2));
         if (fieldIndex->getZExtValue() > srcSize - 2) continue;
+        GEPs->push_back(&I);
 
         /* std::cerr << "New GEP: \t"; */
         /* GEP->dump(); */
         /* std::cerr << "Number of fields: " << srcSize << " \tCurrent field idx: "; */
         /* std::cerr << fieldIndex->getZExtValue() << std::endl; */
-        GEPs->push_back(&I);
       }
     }
   }
