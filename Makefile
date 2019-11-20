@@ -1,7 +1,7 @@
 LLVM_DIR = ${CURDIR}/llvm
 BUILD_DIR = ${CURDIR}/build
 
-all: llvm
+all: debug
 
 llvm: llvm-config
 	(cd ${BUILD_DIR} && make -j`nproc`)
@@ -16,9 +16,9 @@ llvm-config: ${BUILD_DIR}
 
 llvm-debug: ${BUILD_DIR}
 	(cd ${BUILD_DIR} && \
-		CC=clang CXX=clang++ cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt" -G "Unix Makefiles" \
+		CC=clang CXX=clang++ cmake -DLLVM_ENABLE_DUMP=ON -DLLVM_ENABLE_DOXYGEN=ON -DLLVM_ENABLE_PROJECTS="clang;compiler-rt" -G "Unix Makefiles" \
 		-DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_OPTIMIZED_TABLEGEN=OFF \
-                -DCMAKE_BUILD_TYPE=Debug -DCOMPILER_RT_DEBUG=ON --enable-debug-symbols ${LLVM_DIR})
+		-DCMAKE_BUILD_TYPE=Debug -DCOMPILER_RT_DEBUG=ON --enable-debug-symbols ${LLVM_DIR})
 
 ${BUILD_DIR}:
 	mkdir -p ${BUILD_DIR}
