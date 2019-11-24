@@ -2702,9 +2702,13 @@ bool AddressSanitizer::insertPoison(std::map<Instruction *, Instruction *> &targ
     DILocation *GEPLoc = iter->first->getDebugLoc().get();
     DILocation *funcLoc = iter->second->getDebugLoc().get();
     iter->first->dump();
-    std::cerr << "at line: " << GEPLoc->getLine() << " \n";
+    if (GEPLoc != nullptr) {
+      std::cerr << "at line: " << GEPLoc->getLine() << " \n";
+    }
     iter->second->dump();
-    std::cerr << "at line: " << funcLoc->getLine() << " \n";
+    if(funcLoc != nullptr) {
+      std::cerr << "at line: " << funcLoc->getLine() << " \n";
+    }
   }
 
   for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
@@ -2714,55 +2718,47 @@ bool AddressSanitizer::insertPoison(std::map<Instruction *, Instruction *> &targ
     if (!isa<GetElementPtrInst>(iter->first)) continue;
     if (!isa<Instruction>(iter->second)) continue;
     GetElementPtrInst *GEP = cast<GetElementPtrInst>(iter->first);
-    Instruction *target = iter->second;
+    Instruction *targetFunction = iter->second;
 
-    if (!isa<LoadInst>(GEP->getPointerOperand())) continue;
-    LoadInst *loadStructAddr = dyn_cast<LoadInst>(GEP->getPointerOperand());
-    Value *operand = loadStructAddr->getOperand(0);
-    if (operand == nullptr) continue;
-
-    /* starting instrument between target Instruction */
-    IRBuilder<> IRB(target);          // instrument between target instruction
+    /* WIP: TODO[High]: GEP->getPointerOperand() might not be LoadInst */
+    /* Solution: insert another GEP just after the GEPInst */
+    IRBuilder<> IRB(GEP);  // instrument between target instruction
+    unsigned fieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+    fieldIndex += 1;                  // poison the next field of access
+    Value *resultOfGEP = nullptr;     // store the result of GEPinst
+    resultOfGEP = IRB.CreateInBoundsGEP(GEP->getSourceElementType(),
+                                  GEP->getPointerOperand(),
+                                  {IRB.getInt32(0), IRB.getInt32(fieldIndex)});
+    Value *castAddrInst = IRB.CreatePointerCast(resultOfGEP, IRB.getInt8PtrTy());
+    /* poison 8 bytes */
+    CallInst *poisonCall = IRB.CreateCall(AsanPoison,
+                                         {castAddrInst, IRB.getInt64(16)});
+    poisonCall->moveBefore(targetFunction);
+    /* unpoison after target function */
+    CallInst *unPoisonCall = IRB.CreateCall(AsanUnPoison,
+                                         {castAddrInst, IRB.getInt64(16)});
+    unPoisonCall->moveAfter(targetFunction);
     /* TODO[Low]: nested structure poison instrument */
-    if (isa<GetElementPtrInst>(operand)) {
-      GetElementPtrInst *nestedStructGEP = dyn_cast<GetElementPtrInst>(operand);
-      LoadInst *nestedStructLoadInst = dyn_cast<LoadInst>(nestedStructGEP->getPointerOperand());
-      GEP->dump();
-      loadStructAddr->dump();
-      nestedStructGEP->dump();
-      nestedStructLoadInst->dump();
-      nestedStructLoadInst->getOperand(0)->dump();
-      /* Value *nestedOperand = nestedStructLoadInst->getOperand(0); */
-      /* Instruction *cloneLoadNestedStructInst = loadNestedStructInst->clone(); */
-      /* cloneLoadNestedStructInst->insertBefore(target); */
-      /* Value *resultOfNestedStructGEP = IRB.CreateInBoundsGEP(nestedGEP->getSourceElementType(), */
-      /*     cloneLoadNestedStructInst, {IRB.getInt32(0), IRB.getInt32(1)}); */
-      /* Value *nestedStructAddr = IRB.CreateLoad(loadNestedStructInst->getType(), */
-      /*                                          loadNestedStructInst->getOperand(0)); */
-      /* Instruction *cloneNestedGEP = nestedGEP->clone(); */
-      /* cloneNestedGEP->insertBefore(target); */
-      /* Instruction *cloneLoadStructInst = loadStructAddr->clone(); */
-      /* cloneLoadStructInst->insertBefore(target); */
-    } else if (isa<AllocaInst>(operand)) {
-      Value *structAddr = IRB.CreateLoad(loadStructAddr->getType(),
-                                         loadStructAddr->getOperand(0));
-      /* create GEP to caculate the address of the target field */
-      unsigned fieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
-      fieldIndex += 1;                  // poison the next field of access
-      Value *resultOfGEP = nullptr;     // store the result of GEPinst
-      resultOfGEP = IRB.CreateInBoundsGEP(GEP->getSourceElementType(),
-                                    structAddr,
-                                    {IRB.getInt32(0), IRB.getInt32(fieldIndex)});
-      /* cast pointer type */
-      Value *castAddrInst = IRB.CreatePointerCast(resultOfGEP, IRB.getInt8PtrTy());
-      /* poison 8 bytes */
-      CallInst *poisonCall = IRB.CreateCall(AsanPoison,
-                                           {castAddrInst, IRB.getInt64(8)});
-      /* unpoison after target function */
-      CallInst *unPoisonCall = IRB.CreateCall(AsanUnPoison,
-                                           {castAddrInst, IRB.getInt64(8)});
-      unPoisonCall->moveAfter(target);
-    }
+    /* if (isa<GetElementPtrInst>(operand)) { */
+    /*   GetElementPtrInst *nestedStructGEP = dyn_cast<GetElementPtrInst>(operand); */
+    /*   LoadInst *nestedStructLoadInst = dyn_cast<LoadInst>(nestedStructGEP->getPointerOperand()); */
+    /*   GEP->dump(); */
+    /*   loadStructAddr->dump(); */
+    /*   nestedStructGEP->dump(); */
+    /*   nestedStructLoadInst->dump(); */
+    /*   nestedStructLoadInst->getOperand(0)->dump(); */
+    /*   Value *nestedOperand = nestedStructLoadInst->getOperand(0); */
+    /*   Instruction *cloneLoadNestedStructInst = loadNestedStructInst->clone(); */
+    /*   cloneLoadNestedStructInst->insertBefore(target); */
+    /*   Value *resultOfNestedStructGEP = IRB.CreateInBoundsGEP(nestedGEP->getSourceElementType(), */
+    /*       cloneLoadNestedStructInst, {IRB.getInt32(0), IRB.getInt32(1)}); */
+    /*   Value *nestedStructAddr = IRB.CreateLoad(loadNestedStructInst->getType(), */
+    /*                                            loadNestedStructInst->getOperand(0)); */
+    /*   Instruction *cloneNestedGEP = nestedGEP->clone(); */
+    /*   cloneNestedGEP->insertBefore(target); */
+    /*   Instruction *cloneLoadStructInst = loadStructAddr->clone(); */
+    /*   cloneLoadStructInst->insertBefore(target); */
+    /* } */
   }
   return true;
 }
