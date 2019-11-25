@@ -18,6 +18,7 @@ llvm-debug: ${BUILD_DIR}
 	(cd ${BUILD_DIR} && \
 		CC=clang CXX=clang++ cmake -DLLVM_ENABLE_DUMP=ON -DLLVM_ENABLE_DOXYGEN=ON -DLLVM_ENABLE_PROJECTS="clang;compiler-rt" -G "Unix Makefiles" \
 		-DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_OPTIMIZED_TABLEGEN=OFF \
+		-DCMAKE_C_FLAGS=-fdebug-macro -DCMAKE_CXX_FLAGS=-fdebug-macro \
 		-DCMAKE_BUILD_TYPE=Debug -DCOMPILER_RT_DEBUG=ON --enable-debug-symbols ${LLVM_DIR})
 
 ${BUILD_DIR}:
