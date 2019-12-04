@@ -701,12 +701,12 @@ struct AddressSanitizer : public FunctionPass {
                                 SmallVector<Instruction *, 32> *GEPs,
                                 TargetLibraryInfo *TLI, ScalarEvolution *SE);
   bool retrieveCallInstwithGEP(Function &F,
-                               std::map<Instruction *, Instruction *> &targetInst,
+                               std::map<User *, Instruction *> &targetInst,
                                TargetLibraryInfo *TLI, ScalarEvolution *SE);
   bool visitGEP(ArrayRef<Instruction *> GEPs,
-      std::map<Instruction *, Instruction *> &targetInst);
+      std::map<User *, Instruction *> &targetInst);
   Instruction *dfsDataFlow(Instruction *inst);
-  bool insertPoison(std::map<Instruction *, Instruction *> &targetInst);
+  bool insertPoison(std::map<User *, Instruction *> &targetInst);
 
 private:
   friend struct FunctionStackPoisoner;
@@ -2672,7 +2672,7 @@ bool AddressSanitizer::runOnFunction(Function &F) {
   SmallVector<Instruction *, 32> GEPs;
   /* TODO[High]: accumulate index of structure. SEE: dsi_opensess.c:63 */
   retrieveGEPwithStructure(F, &GEPs, TLI, SE);
-  std::map<Instruction *, Instruction *> targetInst;
+  std::map<User *, Instruction *> targetInst;
   visitGEP(GEPs, targetInst);
   this->currentFunction = &F;
 
@@ -2683,7 +2683,7 @@ bool AddressSanitizer::runOnFunction(Function &F) {
 
   /* WIP[High]: retrieveCallInstwithGEP */
   retrieveCallInstwithGEP(F, targetInst, TLI, SE);
-  /* std::map<Instruction *, Instruction *>::iterator iter; */
+  /* std::map<User *, Instruction *>::iterator iter; */
   /* for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) { */
   /*   iter->first->dump(); */
   /*   iter->second->dump(); */
@@ -2696,7 +2696,7 @@ bool AddressSanitizer::runOnFunction(Function &F) {
 }
 
 bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
-                            std::map<Instruction *, Instruction *> &targetInst,
+                            std::map<User *, Instruction *> &targetInst,
                             TargetLibraryInfo *TLI, ScalarEvolution *SE) {
   std::cerr << "retrieveCallInstwithGEP: ";
   std::cerr << this->currentFunction->getName().str() << std::endl;
@@ -2730,14 +2730,23 @@ bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
               if (!GEP->hasAllConstantIndices()) continue;
               if (GEP->getNumIndices() != 3) continue;
               // don't consider about last field
-              ConstantInt *fieldIndex = cast<ConstantInt>(GEP->getOperand(3));
-              if (fieldIndex->getZExtValue() > srcSize - 2) continue;
+              ConstantInt *fieldIndex = cast<ConstantInt>(GEP->getOperand(2));
+              if (fieldIndex->getZExtValue() >= srcSize - 1) continue;
               /* TODO: remove duplicate GEP */
               /* TODO: insert callInst with GEP as argument */
-              std::map<Instruction *, Instruction *>::iterator targetIter;
-              targetIter = targetInst.find(cast<Instruction>(GEP));
+              std::map<User *, Instruction *>::iterator targetIter;
+              if (isa<GEPOperator>(iter)) {
+                Instruction *findTarget = dyn_cast_or_null<Instruction>(iter);
+                if (findTarget == nullptr) {
+                  targetIter = targetInst.end();
+                } else {
+                  targetIter = targetInst.find(cast<Instruction>(GEP));
+                }
+              } else {
+                targetIter = targetInst.find(cast<Instruction>(GEP));
+              }
               if (targetIter == targetInst.end()) {
-                targetInst.insert(std::pair<Instruction *, Instruction *>(cast<Instruction>(GEP), cast<Instruction>(inst)));
+                targetInst.insert(std::pair<User *, Instruction *>(GEP, cast<Instruction>(inst)));
                 inst->dump();
               }
             }
@@ -2749,21 +2758,28 @@ bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
   return true;
 }
 
-bool AddressSanitizer::insertPoison(std::map<Instruction *, Instruction *> &targetInst) {
+bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst) {
   if (this->currentFunction->hasName()) {
     std::cerr << "Insert Poison On Function: ";
     std::cerr << this->currentFunction->getName().str() << std::endl;
     std::cerr << "TargetInst pair: " << std::endl;
   }
-  std::map<Instruction *, Instruction *>::iterator iter;
+  std::map<User *, Instruction *>::iterator iter;
+  /* debug dump */
   for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
-    DILocation *GEPLoc = iter->first->getDebugLoc().get();
-    DILocation *funcLoc = iter->second->getDebugLoc().get();
+    DILocation *GEPLoc = nullptr;
+    if (isa<Instruction>(iter->first)) {
+      GEPLoc = cast<Instruction>(iter->first)->getDebugLoc().get();
+    } else if (isa<GEPOperator>(iter->first)) {
+      /* GEPOperator doesn't has getDebugLoc() */
+      /* DILocation *GEPLoc = cast<GEPOperator>(iter->first)->getDebugLoc().get(); */
+    }
     iter->first->dump();
     if (GEPLoc != nullptr) {
       std::cerr << "at line: " << GEPLoc->getLine() << " \n";
     }
     iter->second->dump();
+    DILocation *funcLoc = iter->second->getDebugLoc().get();
     if(funcLoc != nullptr) {
       std::cerr << "at line: " << funcLoc->getLine() << " \n";
     }
@@ -2773,28 +2789,37 @@ bool AddressSanitizer::insertPoison(std::map<Instruction *, Instruction *> &targ
     if (iter->first == nullptr) continue;
     if (iter->second == nullptr) continue;
     /* TODO[Low]: not only poison memcpy CallInst */
-    GetElementPtrInst *GEP = cast<GetElementPtrInst>(iter->first);
+
     Instruction *targetFunction = iter->second;
-    CallInst *targetCallInst = cast<CallInst>(iter->second);
+    CallInst *targetCallInst = cast<CallInst>(targetFunction);
+    Instruction *insertPoint = nullptr;
+    unsigned targetFieldIndex = 0;
+    Type *sourceElementType = nullptr;
+    Value *pointerOperand = nullptr;
+    if (isa<GetElementPtrInst>(iter->first)) {
+      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(iter->first)) {
+        targetFieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+        sourceElementType = GEP->getSourceElementType();
+        pointerOperand = GEP->getPointerOperand();
+      }
+      insertPoint = cast<Instruction>(iter->first);
+    } else if (isa<GEPOperator>(iter->first)) {
+      if (GEPOperator *GEP = dyn_cast<GEPOperator>(iter->first)) {
+        targetFieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+        sourceElementType = GEP->getSourceElementType();
+        pointerOperand = GEP->getPointerOperand();
 
-    Instruction *insertPoint;
-    if (targetCallInst->hasArgument(cast<Value>(iter->first))) {
-      /* poison just above CallInst */
+        sourceElementType->dump();
+        pointerOperand->dump();
+      }
       insertPoint = targetFunction;
-    } else {
-      /* Solution: insert another GEP just after the GEPInst */
-      insertPoint = GEP;
     }
-
-    insertPoint->dump();
+    targetFieldIndex += 1;
 
     IRBuilder<> IRB(insertPoint);
-    unsigned fieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
-    fieldIndex += 1;                  // poison the next field of access
     Value *resultOfGEP = nullptr;     // store the result of GEPinst
-    resultOfGEP = IRB.CreateInBoundsGEP(GEP->getSourceElementType(),
-                                  GEP->getPointerOperand(),
-                                  {IRB.getInt32(0), IRB.getInt32(fieldIndex)});
+    resultOfGEP = IRB.CreateInBoundsGEP(sourceElementType, pointerOperand,
+                            {IRB.getInt32(0), IRB.getInt32(targetFieldIndex)});
     Value *castAddrInst = IRB.CreatePointerCast(resultOfGEP, IRB.getInt8PtrTy());
     /* TODO[Low]: Figure out that how many bytes want to poison */
     CallInst *poisonCall = IRB.CreateCall(AsanPoison,
@@ -2844,17 +2869,30 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       if (calledFunction != nullptr) {
         // only consider about memcpy
         if (calledFunction->getName().endswith("memcpy")) {
-          // do not consider about the third argument of memcpy function
-          Value *firstArg = inst->getArgOperand(0);
-          Value *secondArg = inst->getArgOperand(1);
+          /* Value *firstArg = inst->getArgOperand(0); */
+          /* Value *secondArg = inst->getArgOperand(1); */
           Value *thirdArg = inst->getArgOperand(2);
           // skip the third argument
           if (GEPinst == dyn_cast<Instruction>(thirdArg)) continue;
-          // the first argument is GEP from structure
-          /* if (GetElementPtrInst *isGEP = dyn_cast<GetElementPtrInst>(firstArg)) { */
-          /* } */
-          /* if (GetElementPtrInst *isGEP = dyn_cast<GetElementPtrInst>(secondArg)) { */
-          /* } */
+          return cast<Instruction>(inst);
+        }
+
+        if (calledFunction->getName().endswith("stpcpy")) {
+          return cast<Instruction>(inst);
+        }
+        if (calledFunction->getName().endswith("strcpy")) {
+          return cast<Instruction>(inst);
+        }
+        if (calledFunction->getName().endswith("strcat")) {
+          return cast<Instruction>(inst);
+        }
+        if (calledFunction->getName().endswith("sprintf")) {
+          return cast<Instruction>(inst);
+        }
+        if (calledFunction->getName().endswith("snprintf")) {
+          return cast<Instruction>(inst);
+        }
+        if (calledFunction->getName().endswith("memmove")) {
           return cast<Instruction>(inst);
         }
       }
@@ -2865,7 +2903,7 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
 }
 
 bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
-      std::map<Instruction *, Instruction *> &targetInst) {
+      std::map<User *, Instruction *> &targetInst) {
   ArrayRef<Instruction *>::iterator iter;
   for (iter = GEPs.begin(); iter != GEPs.end(); ++iter) {
     for (User *U : (*iter)->users()) {
@@ -2875,9 +2913,9 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
       Instruction *result = dfsDataFlow(intoDFS);
       if (result == nullptr || !isa<Instruction>(result)) continue;
 
-      /* targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result)); */
+      /* targetInst.insert(std::pair<User *, Instruction *>(*iter, result)); */
       if (targetInst.empty()) {
-        targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+        targetInst.insert(std::pair<User *, Instruction *>(*iter, result));
         continue;
       }
       bool insert = true;
@@ -2885,7 +2923,7 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
       CallInst *call = dyn_cast<CallInst>(result);
       unsigned field = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
       /* searching for duplicate */
-      std::map<Instruction *, Instruction *>::iterator targetIter;
+      std::map<User *, Instruction *>::iterator targetIter;
       for (targetIter = targetInst.begin(); targetIter != targetInst.end(); ++targetIter) {
         GetElementPtrInst *findGEP = dyn_cast<GetElementPtrInst>(targetIter->first);
         CallInst *findCall = dyn_cast<CallInst>(targetIter->second);
@@ -2902,7 +2940,7 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
           } else {
             /* replace old one with new one */
             targetInst.erase(targetIter);
-            targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+            targetInst.insert(std::pair<User *, Instruction *>(*iter, result));
             insert = false;
           }
         } else if(field > findField) {
@@ -2910,7 +2948,7 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
           if (field - findField == 1) {
             /* replace old one with new one */
             targetInst.erase(targetIter);
-            targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+            targetInst.insert(std::pair<User *, Instruction *>(*iter, result));
             insert = false;
           } else {
             /* ignore new one */
@@ -2919,7 +2957,7 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
         }
       }
       if (insert) {
-        targetInst.insert(std::pair<Instruction *, Instruction *>(*iter, result));
+        targetInst.insert(std::pair<User *, Instruction *>(*iter, result));
       }
       /* end of User loop */
     }
