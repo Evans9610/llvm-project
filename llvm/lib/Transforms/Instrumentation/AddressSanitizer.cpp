@@ -88,6 +88,8 @@
 
 #include <iostream>
 #include <map>
+#include <set>
+#include <stack>
 #include "llvm/Analysis/DependenceAnalysis.h"
 
 
@@ -2791,7 +2793,7 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
     /* TODO[Low]: not only poison memcpy CallInst */
 
     Instruction *targetFunction = iter->second;
-    CallInst *targetCallInst = cast<CallInst>(targetFunction);
+    /* CallInst *targetCallInst = cast<CallInst>(targetFunction); */
     Instruction *insertPoint = nullptr;
     unsigned targetFieldIndex = 0;
     Type *sourceElementType = nullptr;
@@ -2857,47 +2859,72 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
 // DFS to traverse dependence graph to find out target function
 Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
   // without use
-  if (GEPinst->use_empty()) {
-    return nullptr;
-  }
-  SmallVector<User *, 32> list;
-  list.append(GEPinst->user_begin(), GEPinst->user_end());
-  while (!list.empty()) {
-    User *U = list.pop_back_val();
-    if (CallInst *inst = dyn_cast<CallInst>(U)) {
-      Function *calledFunction = inst->getCalledFunction();
-      if (calledFunction != nullptr) {
-        // only consider about memcpy
-        if (calledFunction->getName().endswith("memcpy")) {
-          /* Value *firstArg = inst->getArgOperand(0); */
-          /* Value *secondArg = inst->getArgOperand(1); */
-          Value *thirdArg = inst->getArgOperand(2);
-          // skip the third argument
-          if (GEPinst == dyn_cast<Instruction>(thirdArg)) continue;
-          return cast<Instruction>(inst);
-        }
+  if (GEPinst == nullptr) return nullptr;
+  if (GEPinst->use_empty()) return nullptr;
 
-        if (calledFunction->getName().endswith("stpcpy")) {
-          return cast<Instruction>(inst);
-        }
-        if (calledFunction->getName().endswith("strcpy")) {
-          return cast<Instruction>(inst);
-        }
-        if (calledFunction->getName().endswith("strcat")) {
-          return cast<Instruction>(inst);
-        }
-        if (calledFunction->getName().endswith("sprintf")) {
-          return cast<Instruction>(inst);
-        }
-        if (calledFunction->getName().endswith("snprintf")) {
-          return cast<Instruction>(inst);
-        }
-        if (calledFunction->getName().endswith("memmove")) {
-          return cast<Instruction>(inst);
-        }
+  std::stack<Instruction *> stack;
+  std::set<Instruction *> visited;
+  std::set<Instruction *>::iterator iter;
+  Instruction *inst = GEPinst;
+  std::set<std::string> functions {
+    "stpcpy",
+    "strcpy",
+    "strcat",
+    "sprintf",
+    "snprintf",
+    "memmove",
+    "memcpy"
+  };
+
+  stack.push(inst);
+  while (!stack.empty()) {
+    // pop from stack
+    inst = stack.top();
+    stack.pop();
+
+    if (CallInst *call = dyn_cast<CallInst>(inst)) {
+      Function *calledFunction = call->getCalledFunction();
+      if (calledFunction == nullptr) continue;
+      if (calledFunction->getName().endswith("memcpy")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("memmove")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("strcpy")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("stpcpy")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("strcat")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("sprintf")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("snprintf")) {
+        return inst;
       }
     }
-    return dfsDataFlow(cast<Instruction>(U));
+
+    // Instruction is already visited
+    if ((iter = visited.find(inst)) != visited.end()) {
+      continue;
+    } else {
+      visited.insert(inst);
+    }
+
+    std::stack<Instruction *> tmp;
+    Value::user_iterator userIter = GEPinst->user_begin();
+    while (userIter != GEPinst->user_end()) {
+      tmp.push(dyn_cast<Instruction>(*userIter));
+      ++userIter;
+    }
+    while (!tmp.empty()) {
+      stack.push(tmp.top());
+      tmp.pop();
+    }
   }
   return nullptr;
 }
@@ -2906,7 +2933,14 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
       std::map<User *, Instruction *> &targetInst) {
   ArrayRef<Instruction *>::iterator iter;
   for (iter = GEPs.begin(); iter != GEPs.end(); ++iter) {
+
+    std::stack<User *> stack;
     for (User *U : (*iter)->users()) {
+      stack.push(U);
+    }
+    while (!stack.empty()) {
+      User *U = stack.top();
+      stack.pop();
       if (!isa<Instruction>(U)) continue;
       Instruction *intoDFS = cast<Instruction>(U);
       if (intoDFS == nullptr) continue;
