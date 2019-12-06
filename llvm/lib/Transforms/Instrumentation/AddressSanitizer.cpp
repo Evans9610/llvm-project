@@ -2885,6 +2885,7 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
     if (CallInst *call = dyn_cast<CallInst>(inst)) {
       Function *calledFunction = call->getCalledFunction();
       if (calledFunction == nullptr) continue;
+      // ASAN Interceptors
       if (calledFunction->getName().endswith("memcpy")) {
         return inst;
       }
@@ -2894,16 +2895,32 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       if (calledFunction->getName().endswith("strcpy")) {
         return inst;
       }
+      if (calledFunction->getName().endswith("strncpy")) {
+        return inst;
+      }
       if (calledFunction->getName().endswith("stpcpy")) {
+        return inst;
+      }
+      if (calledFunction->getName().endswith("stpncpy")) {
         return inst;
       }
       if (calledFunction->getName().endswith("strcat")) {
         return inst;
       }
-      if (calledFunction->getName().endswith("sprintf")) {
+      if (calledFunction->getName().endswith("strncat")) {
         return inst;
       }
-      if (calledFunction->getName().endswith("snprintf")) {
+      // WITHOUT ASAN Interceptors
+      if (calledFunction->getName().equals("sprintf")) {
+        return inst;
+      }
+      if (calledFunction->getName().equals("snprintf")) {
+        return inst;
+      }
+      if (calledFunction->getName().equals("vsprintf")) {
+        return inst;
+      }
+      if (calledFunction->getName().equals("vsnprintf")) {
         return inst;
       }
     }
