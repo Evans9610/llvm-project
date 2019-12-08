@@ -2749,7 +2749,7 @@ bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
               }
               if (targetIter == targetInst.end()) {
                 targetInst.insert(std::pair<User *, Instruction *>(GEP, cast<Instruction>(inst)));
-                inst->dump();
+                /* inst->dump(); */
               }
             }
           } /* end of for loop */
@@ -2768,24 +2768,24 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
   }
   std::map<User *, Instruction *>::iterator iter;
   /* debug dump */
-  for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
-    DILocation *GEPLoc = nullptr;
-    if (isa<Instruction>(iter->first)) {
-      GEPLoc = cast<Instruction>(iter->first)->getDebugLoc().get();
-    } else if (isa<GEPOperator>(iter->first)) {
-      /* GEPOperator doesn't has getDebugLoc() */
-      /* DILocation *GEPLoc = cast<GEPOperator>(iter->first)->getDebugLoc().get(); */
-    }
-    iter->first->dump();
-    if (GEPLoc != nullptr) {
-      std::cerr << "at line: " << GEPLoc->getLine() << " \n";
-    }
-    iter->second->dump();
-    DILocation *funcLoc = iter->second->getDebugLoc().get();
-    if(funcLoc != nullptr) {
-      std::cerr << "at line: " << funcLoc->getLine() << " \n";
-    }
-  }
+  /* for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) { */
+  /*   DILocation *GEPLoc = nullptr; */
+  /*   if (isa<Instruction>(iter->first)) { */
+  /*     GEPLoc = cast<Instruction>(iter->first)->getDebugLoc().get(); */
+  /*   } else if (isa<GEPOperator>(iter->first)) { */
+  /*     /1* GEPOperator doesn't has getDebugLoc() *1/ */
+  /*     /1* DILocation *GEPLoc = cast<GEPOperator>(iter->first)->getDebugLoc().get(); *1/ */
+  /*   } */
+  /*   iter->first->dump(); */
+  /*   if (GEPLoc != nullptr) { */
+  /*     std::cerr << "at line: " << GEPLoc->getLine() << " \n"; */
+  /*   } */
+  /*   iter->second->dump(); */
+  /*   DILocation *funcLoc = iter->second->getDebugLoc().get(); */
+  /*   if(funcLoc != nullptr) { */
+  /*     std::cerr << "at line: " << funcLoc->getLine() << " \n"; */
+  /*   } */
+  /* } */
 
   for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
     if (iter->first == nullptr) continue;
@@ -2811,8 +2811,8 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
         sourceElementType = GEP->getSourceElementType();
         pointerOperand = GEP->getPointerOperand();
 
-        sourceElementType->dump();
-        pointerOperand->dump();
+        /* sourceElementType->dump(); */
+        /* pointerOperand->dump(); */
       }
       insertPoint = targetFunction;
     }
