@@ -406,6 +406,31 @@ STATISTIC(NumOptimizedAccessesToGlobalVar,
           "Number of optimized accesses to global vars");
 STATISTIC(NumOptimizedAccessesToStackVar,
           "Number of optimized accesses to stack vars");
+// TODO: statistics for every function protections.
+STATISTIC(NumInstrumentedMemcpy,
+          "Number of instrumented memcpy calls");
+STATISTIC(NumInstrumentedMemmove,
+          "Number of instrumented memmove calls");
+STATISTIC(NumInstrumentedStrcpy,
+          "Number of instrumented strcpy calls");
+STATISTIC(NumInstrumentedStrncpy,
+          "Number of instrumented strncpy calls");
+STATISTIC(NumInstrumentedStpcpy,
+          "Number of instrumented stpcpy calls");
+STATISTIC(NumInstrumentedStpncpy,
+          "Number of instrumented stpncpy calls");
+STATISTIC(NumInstrumentedStrcat,
+          "Number of instrumented strcat calls");
+STATISTIC(NumInstrumentedStrncat,
+          "Number of instrumented strncat calls");
+STATISTIC(NumInstrumentedSprintf,
+          "Number of instrumented sprintf calls");
+STATISTIC(NumInstrumentedSnprintf,
+          "Number of instrumented snprintf calls");
+STATISTIC(NumInstrumentedVsprintf
+          "Number of instrumented vsprintf calls");
+STATISTIC(NumInstrumentedVsnprintf
+          "Number of instrumented vsnprintf calls");
 
 namespace {
 
@@ -2887,40 +2912,52 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       if (calledFunction == nullptr) continue;
       // ASAN Interceptors
       if (calledFunction->getName().endswith("memcpy")) {
+        NumInstrumentedMemcpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("memmove")) {
+        NumInstrumentedMemmove++;
         return inst;
       }
       if (calledFunction->getName().endswith("strcpy")) {
+        NumInstrumentedStrcpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("strncpy")) {
+        NumInstrumentedStrncpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("stpcpy")) {
+        NumInstrumentedStpcpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("stpncpy")) {
+        NumInstrumentedStpncpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("strcat")) {
+        NumInstrumentedStrcat++;
         return inst;
       }
       if (calledFunction->getName().endswith("strncat")) {
+        NumInstrumentedStrncat++;
         return inst;
       }
       // WITHOUT ASAN Interceptors
       if (calledFunction->getName().equals("sprintf")) {
+        NumInstrumentedSprintf++;
         return inst;
       }
       if (calledFunction->getName().equals("snprintf")) {
+        NumInstrumentedSnprintf++;
         return inst;
       }
       if (calledFunction->getName().equals("vsprintf")) {
+        NumInstrumentedVsprintf++;
         return inst;
       }
       if (calledFunction->getName().equals("vsnprintf")) {
+        NumInstrumentedVsnprintf++;
         return inst;
       }
     }
