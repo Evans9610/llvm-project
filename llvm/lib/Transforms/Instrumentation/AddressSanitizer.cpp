@@ -427,9 +427,9 @@ STATISTIC(NumInstrumentedSprintf,
           "Number of instrumented sprintf calls");
 STATISTIC(NumInstrumentedSnprintf,
           "Number of instrumented snprintf calls");
-STATISTIC(NumInstrumentedVsprintf
+STATISTIC(NumInstrumentedVsprintf,
           "Number of instrumented vsprintf calls");
-STATISTIC(NumInstrumentedVsnprintf
+STATISTIC(NumInstrumentedVsnprintf,
           "Number of instrumented vsnprintf calls");
 
 namespace {
@@ -2691,9 +2691,9 @@ bool AddressSanitizer::runOnFunction(Function &F) {
 
   LLVM_DEBUG(dbgs() << "ASAN done instrumenting: " << FunctionModified << " "
                     << F << "\n");
-  if (F.hasName()) {
-    std::cerr << "runOnFunction: " << F.getName().str() << std::endl;
-  }
+  /* if (F.hasName()) { */
+  /*   std::cerr << "runOnFunction: " << F.getName().str() << std::endl; */
+  /* } */
 
   /* collect GEPinst with structure access */
   SmallVector<Instruction *, 32> GEPs;
@@ -2725,8 +2725,6 @@ bool AddressSanitizer::runOnFunction(Function &F) {
 bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
                             std::map<User *, Instruction *> &targetInst,
                             TargetLibraryInfo *TLI, ScalarEvolution *SE) {
-  std::cerr << "retrieveCallInstwithGEP: ";
-  std::cerr << this->currentFunction->getName().str() << std::endl;
   const DataLayout &DL = F.getParent()->getDataLayout();
   ObjectSizeOffsetEvaluator ObjSizeEval(DL, TLI, F.getContext(),
                                            /*RoundToAlign=*/true);
@@ -2789,7 +2787,6 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
   if (this->currentFunction->hasName()) {
     std::cerr << "Insert Poison On Function: ";
     std::cerr << this->currentFunction->getName().str() << std::endl;
-    std::cerr << "TargetInst pair: " << std::endl;
   }
   std::map<User *, Instruction *>::iterator iter;
   /* debug dump */
@@ -2818,7 +2815,48 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
     /* TODO[Low]: not only poison memcpy CallInst */
 
     Instruction *targetFunction = iter->second;
-    /* CallInst *targetCallInst = cast<CallInst>(targetFunction); */
+    CallInst *calledInst = cast<CallInst>(targetFunction);
+    Function *calledFunction = calledInst->getCalledFunction();
+    // Statistics
+    // TODO: print out the details of insert points
+      if (calledFunction->getName().endswith("memcpy")) {
+        NumInstrumentedMemcpy++;
+      }
+      if (calledFunction->getName().endswith("memmove")) {
+        NumInstrumentedMemmove++;
+      }
+      if (calledFunction->getName().endswith("strcpy")) {
+        NumInstrumentedStrcpy++;
+      }
+      if (calledFunction->getName().endswith("strncpy")) {
+        NumInstrumentedStrncpy++;
+      }
+      if (calledFunction->getName().endswith("stpcpy")) {
+        NumInstrumentedStpcpy++;
+      }
+      if (calledFunction->getName().endswith("stpncpy")) {
+        NumInstrumentedStpncpy++;
+      }
+      if (calledFunction->getName().endswith("strcat")) {
+        NumInstrumentedStrcat++;
+      }
+      if (calledFunction->getName().endswith("strncat")) {
+        NumInstrumentedStrncat++;
+      }
+      // WITHOUT ASAN Interceptors
+      if (calledFunction->getName().equals("sprintf")) {
+        NumInstrumentedSprintf++;
+      }
+      if (calledFunction->getName().equals("snprintf")) {
+        NumInstrumentedSnprintf++;
+      }
+      if (calledFunction->getName().equals("vsprintf")) {
+        NumInstrumentedVsprintf++;
+      }
+      if (calledFunction->getName().equals("vsnprintf")) {
+        NumInstrumentedVsnprintf++;
+      }
+
     Instruction *insertPoint = nullptr;
     unsigned targetFieldIndex = 0;
     Type *sourceElementType = nullptr;
@@ -2912,52 +2950,40 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       if (calledFunction == nullptr) continue;
       // ASAN Interceptors
       if (calledFunction->getName().endswith("memcpy")) {
-        NumInstrumentedMemcpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("memmove")) {
-        NumInstrumentedMemmove++;
         return inst;
       }
       if (calledFunction->getName().endswith("strcpy")) {
-        NumInstrumentedStrcpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("strncpy")) {
-        NumInstrumentedStrncpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("stpcpy")) {
-        NumInstrumentedStpcpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("stpncpy")) {
-        NumInstrumentedStpncpy++;
         return inst;
       }
       if (calledFunction->getName().endswith("strcat")) {
-        NumInstrumentedStrcat++;
         return inst;
       }
       if (calledFunction->getName().endswith("strncat")) {
-        NumInstrumentedStrncat++;
         return inst;
       }
       // WITHOUT ASAN Interceptors
       if (calledFunction->getName().equals("sprintf")) {
-        NumInstrumentedSprintf++;
         return inst;
       }
       if (calledFunction->getName().equals("snprintf")) {
-        NumInstrumentedSnprintf++;
         return inst;
       }
       if (calledFunction->getName().equals("vsprintf")) {
-        NumInstrumentedVsprintf++;
         return inst;
       }
       if (calledFunction->getName().equals("vsnprintf")) {
-        NumInstrumentedVsnprintf++;
         return inst;
       }
     }
