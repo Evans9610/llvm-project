@@ -42,6 +42,7 @@ using namespace llvm;
 static cl::opt<bool> Stats(
     "stats",
     cl::desc("Enable statistics output from program (available with Asserts)"),
+    cl::ZeroOrMore,
     cl::Hidden);
 
 static cl::opt<bool> StatsAsJSON("stats-json",
