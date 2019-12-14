@@ -14,6 +14,8 @@ if (COMPILER_RT_BUILD_SANITIZERS)
     sanitizer/scudo_interface.h
     sanitizer/tsan_interface.h
     sanitizer/tsan_interface_atomic.h)
+  set(FUZZER_HEADERS
+    fuzzer/FuzzedDataProvider.h)
 endif(COMPILER_RT_BUILD_SANITIZERS)
 
 if (COMPILER_RT_BUILD_XRAY)
@@ -24,6 +26,7 @@ endif(COMPILER_RT_BUILD_XRAY)
 
 set(COMPILER_RT_HEADERS
   ${SANITIZER_HEADERS}
+  ${FUZZER_HEADERS}
   ${XRAY_HEADERS})
 
 set(output_dir ${COMPILER_RT_OUTPUT_DIR}/include)
@@ -49,6 +52,10 @@ install(FILES ${SANITIZER_HEADERS}
   COMPONENT compiler-rt-headers
   PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
   DESTINATION ${COMPILER_RT_INSTALL_PATH}/include/sanitizer)
+install(FILES ${FUZZER_HEADERS}
+  COMPONENT compiler-rt-headers
+  PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+  DESTINATION ${COMPILER_RT_INSTALL_PATH}/include/fuzzer)
 # Install xray headers.
 install(FILES ${XRAY_HEADERS}
   COMPONENT compiler-rt-headers
