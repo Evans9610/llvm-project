@@ -2893,7 +2893,7 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
     /* unpoison after target function */
     CallInst *unPoisonCall = IRB.CreateCall(AsanUnPoison,
                                          {castAddrInst, IRB.getInt64(16)});
-    unPoisonCall->moveAfter(targetFunction);
+    unPoisonCall->moveBefore(targetFunction);
     /* TODO[Low]: nested structure poison instrument */
     /* if (isa<GetElementPtrInst>(operand)) { */
     /*   GetElementPtrInst *nestedStructGEP = dyn_cast<GetElementPtrInst>(operand); */
