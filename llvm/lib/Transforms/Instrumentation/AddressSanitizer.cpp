@@ -734,6 +734,7 @@ struct AddressSanitizer : public FunctionPass {
       std::map<User *, Instruction *> &targetInst);
   Instruction *dfsDataFlow(Instruction *inst);
   bool insertPoison(std::map<User *, Instruction *> &targetInst);
+  void updateStatistics(Function *calledFunction);
 
 private:
   friend struct FunctionStackPoisoner;
@@ -2691,53 +2692,56 @@ bool AddressSanitizer::runOnFunction(Function &F) {
 
   LLVM_DEBUG(dbgs() << "ASAN done instrumenting: " << FunctionModified << " "
                     << F << "\n");
-  /* if (F.hasName()) { */
-  /*   std::cerr << "runOnFunction: " << F.getName().str() << std::endl; */
-  /* } */
+  this->currentFunction = &F;
 
-  /* collect GEPinst with structure access */
+  /* TODO[High]: accumulate index of structure */
+  /* The case looks like: memcpy(dsi->commands + 2, ...) */
+
+  /* collecting GEPinst with structure access */
   SmallVector<Instruction *, 32> GEPs;
-  /* TODO[High]: accumulate index of structure. SEE: dsi_opensess.c:63 */
   retrieveGEPwithStructure(F, &GEPs, TLI, SE);
+
+  /* collecting CallInst which involves structure fields */
   std::map<User *, Instruction *> targetInst;
   visitGEP(GEPs, targetInst);
-  this->currentFunction = &F;
 
   /* TODO[Low]: Instrument across function call */
   /* For example, we pass a pointer which points to a field of a structure into */
   /* a function which accesss by pointer, if we didn't trace the passing then */
   /* we are unable to insert poison in the function */
 
-  /* WIP[High]: retrieveCallInstwithGEP */
+  /* this function deals with the case like: memcpy(GEP ...) */
   retrieveCallInstwithGEP(F, targetInst, TLI, SE);
-  /* std::map<User *, Instruction *>::iterator iter; */
-  /* for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) { */
-  /*   iter->first->dump(); */
-  /*   iter->second->dump(); */
-  /* } */
 
-  if (targetInst.empty()) return FunctionModified;    // nothing to do
+  /* nothing target, return immediately */
+  if (targetInst.empty()) return FunctionModified;
+
+  /* disable poisoning by user, return immediately */
   if (ClDisableStructurePoison) return FunctionModified;
+
   insertPoison(targetInst);
   return FunctionModified;
 }
 
+/*
+ * This function is used to deal with cases like:
+ * memcpy(GEP *, ...)
+ */
 bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
                             std::map<User *, Instruction *> &targetInst,
                             TargetLibraryInfo *TLI, ScalarEvolution *SE) {
   const DataLayout &DL = F.getParent()->getDataLayout();
   ObjectSizeOffsetEvaluator ObjSizeEval(DL, TLI, F.getContext(),
                                            /*RoundToAlign=*/true);
+
+  /* retrieve all instructions in target function to find out all callInst */
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (CallInst *inst = dyn_cast<CallInst>(&I)) {
         Function *calledFunction = inst->getCalledFunction();
+        /* only handle memcpy function now */
         if (calledFunction == nullptr) continue;
         if (!calledFunction->hasName()) continue;
-        /* if (calledFunction->getLinkage() == GlobalValue::AvailableExternallyLinkage) continue; */
-        /* if (ClDebugFunc == calledFunction->getName()) continue; */
-        /* if (calledFunction->getName().startswith("__asan_")) continue; */
-        /* if (!calledFunction->hasFnAttribute(Attribute::SanitizeAddress)) continue; */
         if (calledFunction->getName().endswith("memcpy")) {
           User::op_iterator iter;
           for (iter = inst->arg_begin(); iter != inst->arg_end(); ++iter) {
@@ -2783,6 +2787,53 @@ bool AddressSanitizer::retrieveCallInstwithGEP(Function &F,
   return true;
 }
 
+/*
+ * Statistics for instructionation
+ */
+void AddressSanitizer::updateStatistics(Function *calledFunction) {
+  /* TODO: The details of insert points */
+  if (calledFunction->getName().endswith("memcpy")) {
+    NumInstrumentedMemcpy++;
+  }
+  if (calledFunction->getName().endswith("memmove")) {
+    NumInstrumentedMemmove++;
+  }
+  if (calledFunction->getName().endswith("strcpy")) {
+    NumInstrumentedStrcpy++;
+  }
+  if (calledFunction->getName().endswith("strncpy")) {
+    NumInstrumentedStrncpy++;
+  }
+  if (calledFunction->getName().endswith("stpcpy")) {
+    NumInstrumentedStpcpy++;
+  }
+  if (calledFunction->getName().endswith("stpncpy")) {
+    NumInstrumentedStpncpy++;
+  }
+  if (calledFunction->getName().endswith("strcat")) {
+    NumInstrumentedStrcat++;
+  }
+  if (calledFunction->getName().endswith("strncat")) {
+    NumInstrumentedStrncat++;
+  }
+  /* WITHOUT ASAN Interceptors */
+  if (calledFunction->getName().equals("sprintf")) {
+    NumInstrumentedSprintf++;
+  }
+  if (calledFunction->getName().equals("snprintf")) {
+    NumInstrumentedSnprintf++;
+  }
+  if (calledFunction->getName().equals("vsprintf")) {
+    NumInstrumentedVsprintf++;
+  }
+  if (calledFunction->getName().equals("vsnprintf")) {
+    NumInstrumentedVsnprintf++;
+  }
+}
+
+/*
+ * This function injects poison/unpoisoning code
+ */
 bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst) {
   if (this->currentFunction->hasName()) {
     std::cerr << "Insert Poison On Function: ";
@@ -2812,55 +2863,20 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
   for (iter = targetInst.begin(); iter != targetInst.end(); ++iter) {
     if (iter->first == nullptr) continue;
     if (iter->second == nullptr) continue;
-    /* TODO[Low]: not only poison memcpy CallInst */
 
     Instruction *targetFunction = iter->second;
     CallInst *calledInst = cast<CallInst>(targetFunction);
     Function *calledFunction = calledInst->getCalledFunction();
-    // Statistics
-    // TODO: print out the details of insert points
-      if (calledFunction->getName().endswith("memcpy")) {
-        NumInstrumentedMemcpy++;
-      }
-      if (calledFunction->getName().endswith("memmove")) {
-        NumInstrumentedMemmove++;
-      }
-      if (calledFunction->getName().endswith("strcpy")) {
-        NumInstrumentedStrcpy++;
-      }
-      if (calledFunction->getName().endswith("strncpy")) {
-        NumInstrumentedStrncpy++;
-      }
-      if (calledFunction->getName().endswith("stpcpy")) {
-        NumInstrumentedStpcpy++;
-      }
-      if (calledFunction->getName().endswith("stpncpy")) {
-        NumInstrumentedStpncpy++;
-      }
-      if (calledFunction->getName().endswith("strcat")) {
-        NumInstrumentedStrcat++;
-      }
-      if (calledFunction->getName().endswith("strncat")) {
-        NumInstrumentedStrncat++;
-      }
-      // WITHOUT ASAN Interceptors
-      if (calledFunction->getName().equals("sprintf")) {
-        NumInstrumentedSprintf++;
-      }
-      if (calledFunction->getName().equals("snprintf")) {
-        NumInstrumentedSnprintf++;
-      }
-      if (calledFunction->getName().equals("vsprintf")) {
-        NumInstrumentedVsprintf++;
-      }
-      if (calledFunction->getName().equals("vsnprintf")) {
-        NumInstrumentedVsnprintf++;
-      }
+
+    /* Statistics */
+    updateStatistics(calledFunction);
 
     Instruction *insertPoint = nullptr;
     unsigned targetFieldIndex = 0;
     Type *sourceElementType = nullptr;
     Value *pointerOperand = nullptr;
+
+    /* Cloning GEP */
     if (isa<GetElementPtrInst>(iter->first)) {
       if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(iter->first)) {
         targetFieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
@@ -2869,88 +2885,70 @@ bool AddressSanitizer::insertPoison(std::map<User *, Instruction *> &targetInst)
       }
       insertPoint = cast<Instruction>(iter->first);
     } else if (isa<GEPOperator>(iter->first)) {
+      /* CallInst with GEP arguments, place the new GEP before CallInst */
       if (GEPOperator *GEP = dyn_cast<GEPOperator>(iter->first)) {
         targetFieldIndex = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
         sourceElementType = GEP->getSourceElementType();
         pointerOperand = GEP->getPointerOperand();
-
-        /* sourceElementType->dump(); */
-        /* pointerOperand->dump(); */
       }
       insertPoint = targetFunction;
     }
+
+    /* next field in the structure */
     targetFieldIndex += 1;
 
+    /* code injecting */
     IRBuilder<> IRB(insertPoint);
     Value *resultOfGEP = nullptr;     // store the result of GEPinst
     resultOfGEP = IRB.CreateInBoundsGEP(sourceElementType, pointerOperand,
                             {IRB.getInt32(0), IRB.getInt32(targetFieldIndex)});
     Value *castAddrInst = IRB.CreatePointerCast(resultOfGEP, IRB.getInt8PtrTy());
+
     /* TODO[Low]: Figure out that how many bytes want to poison */
     CallInst *poisonCall = IRB.CreateCall(AsanPoison,
                                          {castAddrInst, IRB.getInt64(16)});
     poisonCall->moveBefore(targetFunction);
+
     /* unpoison after target function */
     CallInst *unPoisonCall = IRB.CreateCall(AsanUnPoison,
                                          {castAddrInst, IRB.getInt64(16)});
     unPoisonCall->moveAfter(targetFunction);
+
     /* TODO[Low]: nested structure poison instrument */
-    /* if (isa<GetElementPtrInst>(operand)) { */
-    /*   GetElementPtrInst *nestedStructGEP = dyn_cast<GetElementPtrInst>(operand); */
-    /*   LoadInst *nestedStructLoadInst = dyn_cast<LoadInst>(nestedStructGEP->getPointerOperand()); */
-    /*   GEP->dump(); */
-    /*   loadStructAddr->dump(); */
-    /*   nestedStructGEP->dump(); */
-    /*   nestedStructLoadInst->dump(); */
-    /*   nestedStructLoadInst->getOperand(0)->dump(); */
-    /*   Value *nestedOperand = nestedStructLoadInst->getOperand(0); */
-    /*   Instruction *cloneLoadNestedStructInst = loadNestedStructInst->clone(); */
-    /*   cloneLoadNestedStructInst->insertBefore(target); */
-    /*   Value *resultOfNestedStructGEP = IRB.CreateInBoundsGEP(nestedGEP->getSourceElementType(), */
-    /*       cloneLoadNestedStructInst, {IRB.getInt32(0), IRB.getInt32(1)}); */
-    /*   Value *nestedStructAddr = IRB.CreateLoad(loadNestedStructInst->getType(), */
-    /*                                            loadNestedStructInst->getOperand(0)); */
-    /*   Instruction *cloneNestedGEP = nestedGEP->clone(); */
-    /*   cloneNestedGEP->insertBefore(target); */
-    /*   Instruction *cloneLoadStructInst = loadStructAddr->clone(); */
-    /*   cloneLoadStructInst->insertBefore(target); */
-    /* } */
   }
   return true;
 }
 
-// DFS to traverse dependence graph to find out target function
+/* DFS to traverse dependence graph to find out target function */
 Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
-  // without use
+  /* without use */
   if (GEPinst == nullptr) return nullptr;
   if (GEPinst->use_empty()) return nullptr;
 
+  /* iterative DFS */
   std::stack<Instruction *> stack;
+  stack.push(GEPinst);
+
+  /* visited set for speed up */
   std::set<Instruction *> visited;
   std::set<Instruction *>::iterator iter;
-  Instruction *inst = GEPinst;
-  std::set<std::string> functions {
-    "stpcpy",
-    "strcpy",
-    "strcat",
-    "sprintf",
-    "snprintf",
-    "memmove",
-    "memcpy"
-  };
 
-  stack.push(inst);
   while (!stack.empty()) {
-    // pop from stack
-    inst = stack.top();
+    /* pop from stack */
+    Instruction *inst = stack.top();
     stack.pop();
 
     if (CallInst *call = dyn_cast<CallInst>(inst)) {
       Function *calledFunction = call->getCalledFunction();
       if (calledFunction == nullptr) continue;
-      // ASAN Interceptors
+
+      /* ASAN Interceptors */
       if (calledFunction->getName().endswith("memcpy")) {
-        return inst;
+
+        /* DO NOT instrument functions having a fixed size. */
+        if (!isa<llvm::ConstantData>(call->getArgOperand(2))) {
+          return inst;
+        }
       }
       if (calledFunction->getName().endswith("memmove")) {
         return inst;
@@ -2973,7 +2971,8 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       if (calledFunction->getName().endswith("strncat")) {
         return inst;
       }
-      // WITHOUT ASAN Interceptors
+
+      /* WITHOUT ASAN Interceptors */
       if (calledFunction->getName().equals("sprintf")) {
         return inst;
       }
@@ -2995,6 +2994,7 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       visited.insert(inst);
     }
 
+    // Reverse order push uses of current inst
     std::stack<Instruction *> tmp;
     Value::user_iterator userIter = GEPinst->user_begin();
     while (userIter != GEPinst->user_end()) {
@@ -3005,47 +3005,71 @@ Instruction *AddressSanitizer::dfsDataFlow(Instruction *GEPinst) {
       stack.push(tmp.top());
       tmp.pop();
     }
+
   }
   return nullptr;
 }
 
+/*
+ * This function will perform DFS to search the use of GEPinst in GEPs,
+ * and pushes instruction pair <GEP, callInst> into targetInst.
+ * It will remove the pair which has same structure to poison while searching.
+ * Only remains the GEPinst which has biggest field index.
+ */
 bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
       std::map<User *, Instruction *> &targetInst) {
   ArrayRef<Instruction *>::iterator iter;
   for (iter = GEPs.begin(); iter != GEPs.end(); ++iter) {
 
+    /* performing iterative DFS */
     std::stack<User *> stack;
     for (User *U : (*iter)->users()) {
       stack.push(U);
     }
+
     while (!stack.empty()) {
+
       User *U = stack.top();
       stack.pop();
+
       if (!isa<Instruction>(U)) continue;
       Instruction *intoDFS = cast<Instruction>(U);
       if (intoDFS == nullptr) continue;
+      /* performing DFS to find out the target function */
       Instruction *result = dfsDataFlow(intoDFS);
       if (result == nullptr || !isa<Instruction>(result)) continue;
 
-      /* targetInst.insert(std::pair<User *, Instruction *>(*iter, result)); */
       if (targetInst.empty()) {
         targetInst.insert(std::pair<User *, Instruction *>(*iter, result));
         continue;
       }
+
       bool insert = true;
       GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(*iter);
       CallInst *call = dyn_cast<CallInst>(result);
       unsigned field = cast<ConstantInt>(GEP->getOperand(2))->getZExtValue();
+
       /* searching for duplicate */
       std::map<User *, Instruction *>::iterator targetIter;
-      for (targetIter = targetInst.begin(); targetIter != targetInst.end(); ++targetIter) {
-        GetElementPtrInst *findGEP = dyn_cast<GetElementPtrInst>(targetIter->first);
-        CallInst *findCall = dyn_cast<CallInst>(targetIter->second);
-        unsigned findField = cast<ConstantInt>(findGEP->getOperand(2))->getZExtValue();
+      for (targetIter = targetInst.begin();
+                        targetIter != targetInst.end(); ++targetIter) {
+
+        GetElementPtrInst *findGEP =
+              dyn_cast<GetElementPtrInst>(targetIter->first);
+        CallInst *findCall =
+              dyn_cast<CallInst>(targetIter->second);
+        unsigned findField =
+              cast<ConstantInt>(findGEP->getOperand(2))->getZExtValue();
+
+        /* not the same structure */
         if (GEP->getSourceElementType() != findGEP->getSourceElementType())
           continue;
+
+        /* not the same call */
         if (call != findCall) continue;
-        /* only compare field index with same structure and same function call */
+
+        /* Compare the index of these two GEPinst, remain the bigger one */
+        /* becase we dont't need to poison the smaller one */
         /* new one index smaller than old one */
         if (field < findField) {
           if (findField - field == 1) {
@@ -3070,6 +3094,7 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
           }
         }
       }
+
       if (insert) {
         targetInst.insert(std::pair<User *, Instruction *>(*iter, result));
       }
@@ -3079,10 +3104,12 @@ bool AddressSanitizer::visitGEP(ArrayRef<Instruction *> GEPs,
   return true;;
 }
 
-/* retrieve all the instruction in function */
+/*
+ * This function will collect all the GEPinst which involves with structure.
+ */
 bool AddressSanitizer::retrieveGEPwithStructure(Function &F,
-                    SmallVector<Instruction *, 32> *GEPs,
-                    TargetLibraryInfo *TLI, ScalarEvolution *SE) {
+                          SmallVector<Instruction *, 32> *GEPs,
+                          TargetLibraryInfo *TLI, ScalarEvolution *SE) {
   const DataLayout &DL = F.getParent()->getDataLayout();
   ObjectSizeOffsetEvaluator ObjSizeEval(DL, TLI, F.getContext(),
                                            /*RoundToAlign=*/true);
@@ -3090,23 +3117,23 @@ bool AddressSanitizer::retrieveGEPwithStructure(Function &F,
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-        // only consider about GEP with structure
+        /* only consider about GEP with structure */
         if (!GEP->getSourceElementType()->isStructTy()) continue;
 
-        // only consider about non-literal structures and must have name
+        /* only consider about non-literal structures and must have name */
         StructType *srcTy = cast<StructType>(GEP->getSourceElementType());
         if (srcTy->isLiteral()) continue;
         if (!srcTy->hasName()) continue;
 
-        // only consider about the struct has multiple members
+        /* only consider about the struct has multiple members */
         unsigned srcSize = srcTy->getNumElements();
         if (!(srcSize > 1)) continue;
 
-        // only consider about the GEP with fixed two indices
+        /* only consider about the GEP with fixed two indices */
         if (!GEP->hasAllConstantIndices()) continue;
         if (GEP->getNumIndices() != 2) continue;
 
-        // don't consider about last field
+        /* don't consider about last field */
         ConstantInt *fieldIndex = cast<ConstantInt>(GEP->getOperand(2));
         if (fieldIndex->getZExtValue() > srcSize - 2) continue;
         GEPs->push_back(&I);
